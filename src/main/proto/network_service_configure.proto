@@ -1,0 +1,432 @@
+syntax = "proto3";
+option java_package = "com.equinix.bluewhale.grpc.provisioning";
+option go_package = "com.equinix.bluewhale.grpc.provisioning";
+
+import "google/protobuf/descriptor.proto";
+
+// Validation rules from https://github.com/envoyproxy/protoc-gen-validate
+import "validate.proto";
+
+extend google.protobuf.FileOptions {
+  // A custom option usable for us. The 52012 it's just a unique tag, *not* the option's actual value.
+  int64 schema_version = 52012;
+}
+
+// The version of this entire protocol specification. Increase the number manually on any change.
+// The application shouldn't depend on this version when parsing on-the-wire protobuf messages, but it is meant
+// to account for it when parsing the JSONized protobuf messages.
+//
+// This version is meant to mark JSON-to-JSON incompatibilities, so increase it also when renaming a field (which
+// is an example of Protobuf-invisible change which still remains JSON-visible).
+option (schema_version) = 1;
+
+service Configure {
+  // Main entrypoint for instance network configuration requests.
+  //
+  // Restriction on subfields interface_a / interface_b (in ConfigurationRequest.instance_config.network_modes.*):
+  //
+  // 1. Do not change device_hostname field between the calls to this rpc (even when it's a letter capitalization
+  // or conversion to/from fully qualified domain name).
+  //
+  // 2. If there is a Configuration already applied on the same combination of interface_a.device_hostname
+  // and interface_a.name as this call has, the current call should retain also the same interface_b.device_hostname
+  // and interface_b.name (i.e. interface_a and interface_b are now permanently bundled).
+  // To switch to a different interface_b you must first configure UnenrolledMode. Such Configuration, if applied,
+  // unbundles interface_b from interface_a, and allows the subsequent call to freely change interface_b.
+  rpc Configure (ConfigurationRequest) returns (ConfigStatusMessage) {}
+
+  // Same as Configure followed by ConfigStatus.
+  rpc ConfigureAndSubscribe (ConfigurationRequest) returns (stream ConfigStatusMessage) {}
+
+  // Add an additional entry to the journal, given a config_id to update the status of that configuration sequence
+  rpc UpdateConfigStatus (UpdateConfigStatusRequest) returns (ConfigStatusMessage) {}
+
+  // Use UUID returned in ConfigStatusMessage to subscribe to stream of status updates
+  rpc ConfigStatus (ConfigStatusRequest) returns (stream ConfigStatusMessage) {}
+
+  // Primarily for use between controller and agent,
+  // sends current configuration and new configuration so agent can generate the necessary config to change / replace
+  rpc ReplaceConfiguration (ReplaceConfigRequest) returns (ConfigStatusMessage) {}
+
+  // Determines if the switch config matches the intended state
+  rpc DriftDetect (DriftDetectRequest) returns (DriftDetectResponse) {}
+
+  // Determines if the instance's config matches the intended state
+  rpc InstanceDriftDetect (InstanceDriftDetectRequest) returns (DriftDetectResponse) {}
+
+  // Same as Configure but does not alter anything on network switches. Stores request in the database as the current
+  // configuration. It is the caller's responsibility to have it applied onto the network switches.
+  rpc JournalOnly (JournalOnlyRequest) returns (JournalOnlyResponse) {}
+}
+
+message Instance {
+  string id = 1;
+  string project_id = 2;
+  string hardware_id = 3 [(validate.rules).string.min_len = 1];
+}
+
+message Switch {
+  string hostname = 1 [(validate.rules).string.min_len = 1];
+  // Do not set (used internally between orca-controller and orca-agent).
+  string loopback0_address = 2;
+  // The Switch's default local ASN
+  uint32 asn = 3;
+}
+
+message Switchport {
+  enum Speed {
+    UNKNOWN = 0;
+    SPEED_10GB = 1;
+    SPEED_25GB = 2;
+    SPEED_100GB = 3;
+  }
+
+  string name = 1;
+  string description = 2;
+  // Do not set (used internally between orca-controller and orca-agent).
+  Speed speed = 3 [(validate.rules).enum.defined_only = true];
+  bool enabled = 4;
+  Switch switch = 5 [(validate.rules).message.required = true];
+}
+
+message VlanPair {
+  uint32 rack_local_vlan_id = 1;
+  uint32 customer_vlan_id = 2;
+}
+
+message LegacyVlan {
+  uint32 id = 1;
+}
+
+message Vlan {
+  oneof assignment {
+    LegacyVlan legacy_vlan = 1;
+    VlanPair vlan_pair = 2;
+  }
+  uint32 vni = 3;
+  MetalGateway metal_gateway = 4;
+  bool vcf_attached = 5;
+}
+
+message MetalGateway {
+  // If the VRF is nil, the MetalGateway has no associated VRF
+  VRF vrf = 1;
+  repeated string prefixes = 2;
+}
+
+message VRF {
+  string vrf_uuid = 1;
+  uint32 ip_vrf_vni = 2;
+}
+
+message TrunkPort {
+  Switchport switchport = 1 [(validate.rules).message.required = true];
+  uint32 native_vlan = 2;
+  repeated Vlan trunked_vlans = 3;
+}
+
+message Portchannel {
+  string name = 1 [(validate.rules).string.min_len = 1];
+  string description = 2;
+  bool lacp_fallback = 3;
+}
+
+message Bgp {
+  string password = 1;
+  BgpNeighbor v4 = 2;
+  BgpNeighbor v6 = 3;
+}
+
+message BgpNeighbor {
+  bool enabled = 1;
+  bool enable_default_route = 2;
+  string address = 3;
+  uint32 remote_asn = 4;
+  string description = 5;
+  uint32 max_prefixes = 6;
+}
+
+message L3Bonded {
+  Portchannel portchannel = 2 [(validate.rules).message.required = true];
+  Switchport interface_a = 3 [(validate.rules).message.required = true];
+  Switchport interface_b = 4 [(validate.rules).message.required = true];
+  repeated string addresses = 5;
+  uint32 native_vlan = 6;
+  repeated ElasticIP elastic_ip = 8;
+  Bgp bgp = 9;
+  // Do not set (used internally between orca-controller and orca-agent).
+  string relay_address = 10;
+}
+
+message L2Bonded {
+  Portchannel portchannel = 2 [(validate.rules).message.required = true];
+  Switchport interface_a = 3 [(validate.rules).message.required = true];
+  Switchport interface_b = 4 [(validate.rules).message.required = true];
+  uint32 native_vlan = 5;
+  repeated Vlan trunked_vlans = 6;
+}
+
+message HybridBonded {
+  Portchannel portchannel = 2 [(validate.rules).message.required = true];
+  Switchport interface_a = 3 [(validate.rules).message.required = true];
+  Switchport interface_b = 4 [(validate.rules).message.required = true];
+  repeated string addresses = 5;
+  uint32 native_vlan = 6;
+  repeated Vlan trunked_vlans = 7;
+  repeated ElasticIP elastic_ip = 8;
+  Bgp bgp = 9;
+}
+
+message L2Unbonded {
+  TrunkPort interface_a = 2 [(validate.rules).message.required = true];
+  TrunkPort interface_b = 3 [(validate.rules).message.required = true];
+}
+
+message HybridUnbonded {
+  Portchannel portchannel = 2 [(validate.rules).message.required = true];
+  Switchport interface_a = 3 [(validate.rules).message.required = true];
+  TrunkPort interface_b = 4 [(validate.rules).message.required = true];
+  repeated string addresses = 5;
+  uint32 native_vlan = 6;
+  repeated ElasticIP elastic_ip = 8;
+  Bgp bgp = 9;
+}
+
+message Deprovision {
+  Portchannel portchannel = 2 [(validate.rules).message.required = true];
+  Switchport interface_a = 3 [(validate.rules).message.required = true];
+  Switchport interface_b = 4 [(validate.rules).message.required = true];
+  repeated string addresses = 5;
+  uint32 native_vlan = 6;
+  string relay_address = 7;
+}
+
+message Unenrolled {
+  Switchport interface_a = 1 [(validate.rules).message.required = true];
+  Switchport interface_b = 2 [(validate.rules).message.required = true];
+}
+
+message InstanceConfiguration {
+  Instance instance = 1 [(validate.rules).message.required = true];
+  repeated NetworkMode network_modes = 2 [(validate.rules).repeated.min_items = 1];
+}
+
+message ProjectSwitchConfiguration {
+  string id = 1 [(validate.rules).string.min_len = 1];
+
+  // acl_prefixes contains prefixes permitted within the project's ACL
+  repeated string acl_prefixes = 2;
+
+  // local_prefixes refers to internal prefixes that the project is allowed to advertise out via bgp
+  repeated string local_prefixes = 3;
+  // global_prefixes refers to validated public prefixes that the project is allowed to advertise out via bgp
+  repeated string global_prefixes = 4;
+
+  // Vlans that should be present in the Switch's L2 forwarding table for this paritcular project
+  repeated Vlan switch_vlans = 5;
+
+  // device_a points to the primary switch onto which to apply this configuration
+  Switch device_a = 6;
+  // device_b points to the secondary switch onto which to apply this configuration
+  Switch device_b = 7;
+}
+
+message NetworkMode {
+  oneof mode {
+    option (validate.required) = true;
+
+    L3Bonded l3_bonded_mode = 1;
+    L2Bonded l2_bonded_mode = 2;
+    HybridBonded hybrid_bonded_mode = 3;
+    L2Unbonded l2_unbonded_mode = 4;
+    HybridUnbonded hybrid_unbonded_mode = 5;
+    Deprovision deprovision = 6;
+    Unenrolled unenrolled = 7;
+  }
+}
+
+message Configuration {
+  // InstanceConfiguration is the config type for Metal instances attached to a standard pair of ToR switches
+  InstanceConfiguration instance_config = 1;
+
+  // ProjectSwitchConfiguration is the config type for Metal projects with respect to a pair of ToR switches
+  ProjectSwitchConfiguration project_switch_config = 2;
+
+  // Layer 2 Port Request
+  L2PortServiceRequest l2_port_config = 3;
+
+  //Layer 2 VPN Request
+  L2VPNServiceRequest l2_vpn_config = 4;
+}
+
+message ConfigurationRequest {
+  Configuration configuration = 1 [(validate.rules).message.required = true];
+}
+
+message JournalOnlyRequest {
+  Configuration configuration = 1 [(validate.rules).message.required = true];
+}
+
+enum Status {
+  UNKNOWN = 0;
+  RECEIVED = 1;
+  VALIDATING = 2;
+  APPLYING = 3;
+  SUCCEEDED = 4;
+  FAILED = 5;
+}
+
+message Update {
+  string path = 1;
+  string value = 2;
+}
+
+message Notification {
+  repeated Update updates = 1;
+  repeated string deletes = 2;
+}
+
+message UpdateConfigStatusRequest {
+  string config_id = 1;
+  Status status = 2;
+}
+
+message ConfigStatusMessage {
+  string config_id = 1;
+  Status status = 2;
+}
+
+message JournalOnlyResponse {
+  string config_id = 1;
+  Status status = 2;
+}
+
+message ConfigStatusRequest {
+  string config_id = 1;
+}
+
+message ReplaceConfigRequest {
+  Configuration current = 1;
+  Configuration new = 2;
+}
+
+message DriftDetectRequest {
+  Configuration intended = 2;
+}
+
+message DriftDetectResponse {
+  map<string, Notification> notifications = 1;
+}
+
+message InstanceDriftDetectRequest {
+  string instance_id = 1;
+}
+
+message ElasticIP {
+  string prefix = 1;
+  string next_hop_address = 2;
+}
+
+
+message L2PortServiceRequest {
+  string uuid = 1;
+  string device = 2;
+  string intName = 3;
+  string intDesc = 4;
+  Tpid intTpid = 5;
+  PortEncapsulation portEncapsulation = 6;
+  uint32 speed = 7;
+  ServiceType serviceType = 8;
+  RequestHeaders requestHeaders = 9;
+  uint32 mtu = 10;
+}
+
+message RequestHeaders {
+  Region region = 1;
+  string workflowId = 2;
+  string requestType = 3;
+  string metro = 4;
+  string correlationId = 5;
+  string serviceId = 6;
+}
+
+enum Tpid {
+  TPID_8100 = 0;
+  TPID_9100 = 1;
+  TPID_9200 = 2;
+}
+
+enum PortEncapsulation {
+  DOT1Q = 0;
+  DOT1AD = 1;
+}
+
+enum ServiceType {
+  MSP = 0;
+  EPL = 1;
+}
+
+enum Region {
+  AMER = 0;
+  EMEA = 1;
+  APAC = 2;
+  BR = 3;
+}
+
+message L2VPNServiceRequest {
+  string uuid = 1;
+  uint32 equinixAsn = 2;
+  string riName = 3;
+  string riDesc = 4;
+  uint32 riServiceId = 5;
+  uint32 rate = 6;
+  uint32 rtSequence = 7;
+  string rd =8;
+  string customerId = 9;
+  string customerShortName = 10;
+  string customerContact = 11;
+  string customerDescription = 12;
+  string deviceChainGroupId = 13;
+  GeoScope geoScope = 14;
+  SiteProperties site = 15;
+}
+
+message SiteProperties {
+  string device = 1;
+  string metro = 2;
+  string riServiceId = 3;
+  string vxlanId = 4;
+  string mode = 5;
+  repeated string customerMacList = 6;
+  string clusterInfo = 7;
+  VnfInfo vnfInfo = 8;
+  string loopback = 9;
+  uint32 rdSeq = 10;
+  string intName = 11;
+  Tpid intTpid = 12;
+  Tpid outerTpid = 13;
+  Tpid innerTpid = 14;
+  PortEncapsulation portEncapsulation = 15;
+  uint32 cTag = 16;
+  uint32 sTag = 17;
+  string intUnit = 18;
+  string intUnitDesc = 19;
+  uint32 evpnVlan = 20;
+}
+
+enum GeoScope {
+  COUNTRY = 0;
+}
+
+message VnfInfo {
+  string vnfVendor = 1;
+  VnfType vnfType = 2;
+}
+
+enum VnfType {
+    EM = 0;
+    CM = 1;
+    SDWAN = 2;
+    CM_CLUSTER = 3;
+    SDWAN_CLUSTER = 4;
+}
