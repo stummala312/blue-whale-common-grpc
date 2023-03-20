@@ -1,6 +1,6 @@
 syntax = "proto3";
 option java_package = "com.equinix.bluewhale.grpc.provisioning";
-option go_package = "com.equinix.bluewhale.grpc.provisioning";
+option go_package = "github.com/stummala312/blue-whale-common-grpc/pkg/configure/proto";
 
 import "google/protobuf/descriptor.proto";
 

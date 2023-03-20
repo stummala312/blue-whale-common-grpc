@@ -4,7 +4,7 @@
 // - protoc             v3.19.1
 // source: network_service_configure.proto
 
-package com_equinix_bluewhale_grpc_provisioning
+package proto
 
 import (
 	context "context"
