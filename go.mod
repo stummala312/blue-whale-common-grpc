@@ -1,4 +1,4 @@
-module com.equinix.bluewhale
+module github.com/stummala312/blue-whale-common-grpc
 
 go 1.18
 
